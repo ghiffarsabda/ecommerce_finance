@@ -1,21 +1,17 @@
-import os
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
+import streamlit as st
 
 # Database configuration
 DB_CONFIG = {
-    'host': os.getenv('DB_HOST'),
-    'database': os.getenv('DB_NAME'),
-    'user': os.getenv('DB_USER'),
-    'password': os.getenv('DB_PASSWORD'),
-    'port': 5432,
-    'sslmode': 'require'  # Important for Neon.tech
+    'host': st.secrets["postgres"]["host"],
+    'database': st.secrets["postgres"]["database"],
+    'user': st.secrets["postgres"]["user"],
+    'password': st.secrets["postgres"]["password"],
+    'port': st.secrets["postgres"]["port"],
+    'sslmode': 'require'
 }
 
 # Security configuration
-SECRET_KEY = os.getenv('SECRET_KEY', 'docilworks-secret-key-2024')
+SECRET_KEY = st.secrets["SECRET_KEY"]
 SALT_ROUNDS = 10
 
 # File upload configuration
