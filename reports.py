@@ -112,6 +112,14 @@ class ReportGenerator:
                                    max_value=max_date,
                                    value=max_date)
 
+        # Store selection
+        available_stores = self.get_unique_stores()
+        selected_stores = st.multiselect(
+            "Choose Store Account(s)", 
+            available_stores,
+            placeholder="Choose Store Account(s)"
+        )
+
         # Total income chart
         total_income_df = self.get_total_income_data(start_date, end_date)
         if not total_income_df.empty:
@@ -125,15 +133,7 @@ class ReportGenerator:
             )
             st.plotly_chart(fig1, use_container_width=True)
 
-        # Store selection
-        available_stores = self.get_unique_stores()
-        selected_stores = st.multiselect(
-            "Choose Store Account(s)", 
-            available_stores,
-            placeholder="Choose Store Account(s)"
-        )
-
-        # Store comparison chart
+        # Store income comparison chart
         store_income_df = self.get_store_income_data(start_date, end_date, selected_stores)
         if not store_income_df.empty:
             fig2 = px.line(store_income_df, 
@@ -146,42 +146,49 @@ class ReportGenerator:
                 xaxis_title="Date"
             )
             st.plotly_chart(fig2, use_container_width=True)
-            
-    def render_income_data_section(self):
-        """Render Income Data section"""
-        st.header("Income Data")
-        
-        # Store filter
-        stores = self.get_unique_stores()
-        selected_store = st.selectbox("Filter by Store Account", ["All"] + stores)
-        
-        # Sort direction
-        sort_direction = st.radio("Sort by date", 
-                                ["Ascending", "Descending"],
-                                horizontal=True)
-        
-        # Get and display filtered data
-        filtered_data = self.get_filtered_income_data(selected_store, sort_direction.lower())
-        if not filtered_data.empty:
-            st.dataframe(filtered_data, hide_index=True, use_container_width=True)
-        else:
-            st.info("No data available")
-            
-    def render_details_section(self):
-        """Render the details section"""
-        st.header("Report Details")
-        tab1, tab2, tab3 = st.tabs([
-            "As Per Today",
-            "Today's Income",
-            "Income Data"
-        ])
-        
-        with tab1:
-            self.render_as_per_today_tab()
-        with tab2:
-            self.render_todays_income_tab()
-        with tab3:
-            self.render_income_data_tab()
+
+        # New admin input charts
+        # Visitors chart
+        visitors_df = self.get_admin_data_by_type("Pengunjung", start_date, end_date, selected_stores)
+        if not visitors_df.empty:
+            fig3 = px.line(visitors_df,
+                          x='date',
+                          y='value',
+                          color='store_account_id',
+                          title='Visitors by Store Account')
+            fig3.update_layout(
+                yaxis_title="Visitors",
+                xaxis_title="Date"
+            )
+            st.plotly_chart(fig3, use_container_width=True)
+
+        # Sales chart
+        sales_df = self.get_admin_data_by_type("Penjualan", start_date, end_date, selected_stores)
+        if not sales_df.empty:
+            fig4 = px.line(sales_df,
+                          x='date',
+                          y='value',
+                          color='store_account_id',
+                          title='Sales by Store Account')
+            fig4.update_layout(
+                yaxis_title="Sales",
+                xaxis_title="Date"
+            )
+            st.plotly_chart(fig4, use_container_width=True)
+
+        # Orders chart
+        orders_df = self.get_admin_data_by_type("Pesanan", start_date, end_date, selected_stores)
+        if not orders_df.empty:
+            fig5 = px.line(orders_df,
+                          x='date',
+                          y='value',
+                          color='store_account_id',
+                          title='Orders by Store Account')
+            fig5.update_layout(
+                yaxis_title="Orders",
+                xaxis_title="Date"
+            )
+            st.plotly_chart(fig5, use_container_width=True)
     
     
 
@@ -236,6 +243,135 @@ class ReportGenerator:
                 return pd.DataFrame(cur.fetchall())
         except Exception as e:
             st.error(f"Error getting store income: {str(e)}")
+            return pd.DataFrame()
+    
+    def get_admin_monthly_comparison_data(self, data_type, main_month, comp_month):
+        """Get monthly comparison data for admin input"""
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    WITH main_month_data AS (
+                        SELECT 
+                            store_account_id,
+                            SUM(value) as current_mo
+                        FROM imp_gs_admininput
+                        WHERE username = %s
+                        AND type = %s
+                        AND date >= %s 
+                        AND date < (%s + INTERVAL '1 month')
+                        GROUP BY store_account_id
+                    ),
+                    comp_month_data AS (
+                        SELECT 
+                            store_account_id,
+                            SUM(value) as previous_mo
+                        FROM imp_gs_admininput
+                        WHERE username = %s
+                        AND type = %s
+                        AND date >= %s 
+                        AND date < (%s + INTERVAL '1 month')
+                        GROUP BY store_account_id
+                    )
+                    SELECT 
+                        COALESCE(m.store_account_id, c.store_account_id) as "Accounts",
+                        COALESCE(m.current_mo, 0) as current_mo,
+                        COALESCE(c.previous_mo, 0) as previous_mo
+                    FROM main_month_data m
+                    FULL OUTER JOIN comp_month_data c 
+                        ON m.store_account_id = c.store_account_id
+                    WHERE COALESCE(m.current_mo, 0) != 0 
+                       OR COALESCE(c.previous_mo, 0) != 0
+                    ORDER BY "Accounts"
+                """, (st.session_state.username, data_type, main_month, main_month, 
+                     st.session_state.username, data_type, comp_month, comp_month))
+                
+                result = cur.fetchall()
+                if not result:
+                    return pd.DataFrame()
+                    
+                df = pd.DataFrame(result)
+                
+                # Calculate differences
+                df['Diff_num'] = df['current_mo'] - df['previous_mo']
+                
+                # Calculate percentage difference
+                df['Difference %'] = df.apply(
+                    lambda row: 0 if row['previous_mo'] == 0 
+                    else ((row['current_mo'] - row['previous_mo']) / row['previous_mo'] * 100), 
+                    axis=1
+                )
+                
+                # Format number columns if not sales
+                if data_type != 'Penjualan':
+                    for col in ['current_mo', 'previous_mo', 'Diff_num']:
+                        df[col] = df[col].apply(lambda x: f"{int(x):,}")
+                else:
+                    # Format currency for sales
+                    for col in ['current_mo', 'previous_mo', 'Diff_num']:
+                        df[col] = df[col].apply(lambda x: f"Rp{int(x):,}")
+                
+                df['Difference %'] = df['Difference %'].apply(lambda x: f"{x:.2f}%")
+                
+                return df
+                
+        except Exception as e:
+            st.error(f"Error in {data_type} monthly comparison: {str(e)}")
+            return pd.DataFrame()
+        
+    def get_admin_data_by_type(self, data_type, start_date, end_date, selected_stores=None):
+        """Get admin input data filtered by type and date range"""
+        try:
+            with get_db_cursor() as cur:
+                if selected_stores:
+                    cur.execute("""
+                        SELECT 
+                            date,
+                            store_account_id,
+                            value
+                        FROM imp_gs_admininput
+                        WHERE username = %s
+                        AND type = %s
+                        AND date BETWEEN %s AND %s
+                        AND store_account_id = ANY(%s)
+                        GROUP BY date, store_account_id, value
+                        ORDER BY date, store_account_id
+                    """, (st.session_state.username, data_type, start_date, end_date, selected_stores))
+                else:
+                    cur.execute("""
+                        SELECT 
+                            date,
+                            store_account_id,
+                            value
+                        FROM imp_gs_admininput
+                        WHERE username = %s
+                        AND type = %s
+                        AND date BETWEEN %s AND %s
+                        GROUP BY date, store_account_id, value
+                        ORDER BY date, store_account_id
+                    """, (st.session_state.username, data_type, start_date, end_date))
+                return pd.DataFrame(cur.fetchall())
+        except Exception as e:
+            st.error(f"Error getting {data_type} data: {str(e)}")
+            return pd.DataFrame()
+
+    def get_total_admin_data_by_type(self, data_type, start_date, end_date):
+        """Get total admin input data for a specific type"""
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT 
+                        date,
+                        SUM(value) as total_value
+                    FROM imp_gs_admininput
+                    WHERE username = %s
+                    AND type = %s
+                    AND date BETWEEN %s AND %s
+                    GROUP BY date
+                    ORDER BY date
+                """, (st.session_state.username, data_type, start_date, end_date))
+                return pd.DataFrame(cur.fetchall())
+        except Exception as e:
+            st.error(f"Error getting total {data_type} data: {str(e)}")
             return pd.DataFrame()
 
     def render_as_per_today_tab(self):
@@ -396,6 +532,79 @@ class ReportGenerator:
                 
         except Exception as e:
             st.error(f"Error getting daily comparison: {str(e)}")
+            return pd.DataFrame()
+        
+    def get_daily_admin_comparison_data(self, data_type):
+        """Get today vs yesterday comparison data for admin input"""
+        try:
+            today = datetime.now().date()
+            yesterday = today - timedelta(days=1)
+
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    WITH today_data AS (
+                        SELECT 
+                            store_account_id,
+                            SUM(value) as today
+                        FROM imp_gs_admininput
+                        WHERE username = %s
+                        AND type = %s
+                        AND date = %s
+                        GROUP BY store_account_id
+                    ),
+                    yesterday_data AS (
+                        SELECT 
+                            store_account_id,
+                            SUM(value) as yesterday
+                        FROM imp_gs_admininput
+                        WHERE username = %s
+                        AND type = %s
+                        AND date = %s
+                        GROUP BY store_account_id
+                    )
+                    SELECT 
+                        COALESCE(t.store_account_id, y.store_account_id) as "Accounts",
+                        COALESCE(t.today, 0) as today,
+                        COALESCE(y.yesterday, 0) as yesterday
+                    FROM today_data t
+                    FULL OUTER JOIN yesterday_data y ON t.store_account_id = y.store_account_id
+                    WHERE COALESCE(t.today, 0) != 0 
+                       OR COALESCE(y.yesterday, 0) != 0
+                    ORDER BY "Accounts"
+                """, (st.session_state.username, data_type, today, 
+                     st.session_state.username, data_type, yesterday))
+                
+                result = cur.fetchall()
+                if not result:
+                    return pd.DataFrame()
+                    
+                df = pd.DataFrame(result)
+                
+                # Calculate differences
+                df['Diff_num'] = df['today'] - df['yesterday']
+                
+                # Calculate percentage difference
+                df['Diff_%'] = df.apply(
+                    lambda row: 0 if row['yesterday'] == 0 
+                    else ((row['today'] - row['yesterday']) / row['yesterday'] * 100), 
+                    axis=1
+                )
+                
+                # Format columns based on type
+                if data_type != 'Penjualan':
+                    for col in ['today', 'yesterday', 'Diff_num']:
+                        df[col] = df[col].apply(lambda x: f"{int(x):,}")
+                else:
+                    # Format currency for sales
+                    for col in ['today', 'yesterday', 'Diff_num']:
+                        df[col] = df[col].apply(lambda x: f"Rp{int(x):,}")
+                
+                df['Diff_%'] = df['Diff_%'].apply(lambda x: f"{x:.2f}%")
+                
+                return df
+                
+        except Exception as e:
+            st.error(f"Error in {data_type} daily comparison: {str(e)}")
             return pd.DataFrame()
 
     def render_todays_income_tab(self):
@@ -710,8 +919,11 @@ class ReportGenerator:
         current_date = datetime.now()
         return year < current_date.year
     
-    def generate_current_month_pdf(self, monthly_data, monthly_chart, daily_data, daily_chart, month_year):
-        """Generate PDF for current month report including today's income section"""
+    def generate_current_month_pdf(self, comparison_data, monthly_chart,
+                                 visitors_data, orders_data, sales_data,
+                                 daily_visitors, daily_orders, daily_sales,
+                                 month_year):
+        """Generate PDF for current month report including all data"""
         buffer = BytesIO()
         doc = SimpleDocTemplate(
             buffer,
@@ -746,32 +958,59 @@ class ReportGenerator:
         story.append(Paragraph(f"Current Month Report - {month_year}", title_style))
         story.append(Spacer(1, 20))
         
-        # Monthly comparison section
-        story.append(Paragraph("Monthly Comparison", subtitle_style))
+        # Income section
+        story.append(Paragraph("Monthly Income Comparison", subtitle_style))
         if monthly_chart:
             chart_buffer = self.save_chart_for_pdf(monthly_chart)
             if chart_buffer:
                 story.append(Image(chart_buffer, width=available_width, height=300))
         
-        if daily_chart:
-            daily_chart_buffer = self.save_chart_for_pdf(daily_chart)
-            if daily_chart_buffer:
-                story.append(Image(daily_chart_buffer, width=available_width, height=300))
+        if not comparison_data.empty:
+            story.append(Spacer(1, 20))
+            income_table = self.create_pdf_table(comparison_data)
+            story.append(income_table)
         
         story.append(Spacer(1, 30))
         
-        # Today's income section
-        story.append(Paragraph("Today's Income", subtitle_style))
-        if daily_chart:
-            daily_chart_buffer = self.save_chart_for_pdf(daily_chart)
-            if daily_chart_buffer:
-                story.append(Image(daily_chart_buffer, width=500, height=300))
-        
-        if not daily_data.empty:
+        # Visitors section
+        if not visitors_data.empty:
+            story.append(Paragraph("Monthly Visitors Comparison", subtitle_style))
+            visitors_table = self.create_pdf_table(visitors_data)
+            story.append(visitors_table)
             story.append(Spacer(1, 20))
-            daily_table = self.create_pdf_table(daily_data)
-            story.append(daily_table)
+            
+            if not daily_visitors.empty:
+                story.append(Paragraph("Visitors Today", subtitle_style))
+                daily_visitors_table = self.create_pdf_table(daily_visitors)
+                story.append(daily_visitors_table)
+                story.append(Spacer(1, 30))
         
+        # Orders section
+        if not orders_data.empty:
+            story.append(Paragraph("Monthly Orders Comparison", subtitle_style))
+            orders_table = self.create_pdf_table(orders_data)
+            story.append(orders_table)
+            story.append(Spacer(1, 20))
+            
+            if not daily_orders.empty:
+                story.append(Paragraph("Orders Today", subtitle_style))
+                daily_orders_table = self.create_pdf_table(daily_orders)
+                story.append(daily_orders_table)
+                story.append(Spacer(1, 30))
+        
+        # Sales section
+        if not sales_data.empty:
+            story.append(Paragraph("Monthly Sales Comparison", subtitle_style))
+            sales_table = self.create_pdf_table(sales_data)
+            story.append(sales_table)
+            story.append(Spacer(1, 20))
+            
+            if not daily_sales.empty:
+                story.append(Paragraph("Sales Today", subtitle_style))
+                daily_sales_table = self.create_pdf_table(daily_sales)
+                story.append(daily_sales_table)
+        
+        # Build PDF
         doc.build(story)
         buffer.seek(0)
         return buffer.getvalue()
@@ -953,55 +1192,99 @@ class ReportGenerator:
             current_date = datetime.now()
             current_month = current_date.month
             
-            # Get monthly comparison data
+            # Income comparison section
             comparison_data = self.get_monthly_comparison_data(
                 current_date.replace(day=1),
                 (current_date.replace(day=1) - timedelta(days=1)).replace(day=1)
             )
             
-            if comparison_data.empty:
-                st.info("No data available for current month")
-                return
+            if not comparison_data.empty:
+                st.subheader("Monthly Income Comparison")
+                monthly_chart = self.create_current_month_chart(comparison_data)
+                st.plotly_chart(monthly_chart, use_container_width=True)
+                st.dataframe(comparison_data, hide_index=True, use_container_width=True)
 
-            # Create and display monthly comparison
-            st.subheader("Monthly Comparison")
-            monthly_chart = self.create_current_month_chart(comparison_data)
-            st.plotly_chart(monthly_chart, use_container_width=True)
-            st.dataframe(comparison_data, hide_index=True, use_container_width=True)
+            # Admin input data section
+            st.markdown("---")
             
-            # Add Today's Income section
-            st.markdown("---")  # Add separator
-            st.subheader("Today's Income")
-            
-            daily_comparison = self.get_daily_comparison_data()
-            
-            if daily_comparison.empty:
-                st.info("No data available for today")
-            else:
-                # Create and display chart
-                daily_chart = self.create_daily_comparison_chart(daily_comparison)
-                if daily_chart:
-                    st.plotly_chart(daily_chart, use_container_width=True)
+            # Visitors section
+            st.subheader("Monthly Visitors Comparison")
+            visitors_data = self.get_admin_monthly_comparison_data(  # Fixed method name
+                "Pengunjung",
+                current_date.replace(day=1),
+                (current_date.replace(day=1) - timedelta(days=1)).replace(day=1)
+            )
+            if not visitors_data.empty:
+                st.dataframe(visitors_data, hide_index=True, use_container_width=True)
                 
-                # Display table
-                st.dataframe(daily_comparison, hide_index=True, use_container_width=True)
+            # Today's visitors
+            st.subheader("Visitors Today")
+            daily_visitors = self.get_daily_admin_comparison_data("Pengunjung")
+            if not daily_visitors.empty:
+                st.dataframe(daily_visitors, hide_index=True, use_container_width=True)
+            else:
+                st.info("No visitors data for today")
+            
+            st.markdown("---")
+            
+            # Orders section
+            st.subheader("Monthly Orders Comparison")
+            orders_data = self.get_admin_monthly_comparison_data(  # Fixed method name
+                "Pesanan",
+                current_date.replace(day=1),
+                (current_date.replace(day=1) - timedelta(days=1)).replace(day=1)
+            )
+            if not orders_data.empty:
+                st.dataframe(orders_data, hide_index=True, use_container_width=True)
+                
+            # Today's orders
+            st.subheader("Orders Today")
+            daily_orders = self.get_daily_admin_comparison_data("Pesanan")
+            if not daily_orders.empty:
+                st.dataframe(daily_orders, hide_index=True, use_container_width=True)
+            else:
+                st.info("No orders data for today")
+            
+            st.markdown("---")
+            
+            # Sales section
+            st.subheader("Monthly Sales Comparison")
+            sales_data = self.get_admin_monthly_comparison_data(  # Fixed method name
+                "Penjualan",
+                current_date.replace(day=1),
+                (current_date.replace(day=1) - timedelta(days=1)).replace(day=1)
+            )
+            if not sales_data.empty:
+                st.dataframe(sales_data, hide_index=True, use_container_width=True)
+                
+            # Today's sales
+            st.subheader("Sales Today")
+            daily_sales = self.get_daily_admin_comparison_data("Penjualan")
+            if not daily_sales.empty:
+                st.dataframe(daily_sales, hide_index=True, use_container_width=True)
+            else:
+                st.info("No sales data for today")
             
             # Generate PDF button
-            st.markdown("---")  # Add separator
-            if st.button("Generate PDF Report"):
-                pdf = self.generate_current_month_pdf(
-                    comparison_data,
-                    monthly_chart,
-                    daily_comparison,
-                    daily_chart if not daily_comparison.empty else None,
-                    current_date.strftime('%B %Y')
-                )
-                st.download_button(
-                    "Download PDF",
-                    data=pdf,
-                    file_name=f"current_month_report_{current_date.strftime('%Y_%m')}.pdf",
-                    mime="application/pdf"
-                )
+            #st.markdown("---")
+            #if st.button("Generate PDF Report"):
+            #    pdf = self.generate_current_month_pdf(
+            #        comparison_data=comparison_data,
+            #        monthly_chart=monthly_chart,
+            #        visitors_data=visitors_data if 'visitors_data' in locals() else None,
+            #        orders_data=orders_data if 'orders_data' in locals() else None,
+            #        sales_data=sales_data if 'sales_data' in locals() else None,
+            #        daily_visitors=daily_visitors if 'daily_visitors' in locals() else None,
+            #       daily_orders=daily_orders if 'daily_orders' in locals() else None,
+            #        daily_sales=daily_sales if 'daily_sales' in locals() else None,
+            #        month_year=current_date.strftime('%B %Y')
+            #   )
+            #    st.download_button(
+            #        "Download PDF",
+            #        data=pdf,
+            #        file_name=f"current_month_report_{current_date.strftime('%Y_%m')}.pdf",
+            #        mime="application/pdf"
+            #    )
                 
         except Exception as e:
             st.error(f"Error generating current month report: {str(e)}")
@@ -1067,7 +1350,6 @@ class ReportGenerator:
             return None
     
     def generate_monthly_report(self, year, month):
-        """Generate monthly report"""
         try:
             # Get monthly data
             monthly_data = self.get_all_monthly_data(year)
@@ -1079,26 +1361,70 @@ class ReportGenerator:
             fig = self.create_monthly_bar_chart(monthly_data)
             st.plotly_chart(fig, use_container_width=True)
             
-            # Create and display monthly comparison table
+            # Get comparison dates
+            selected_date = datetime(year, month, 1).date()
+            prev_date = (selected_date - timedelta(days=1)).replace(day=1)
+            
+            # Income comparison
             st.subheader(f"{calendar.month_name[month]} Income Report")
             monthly_table = self.create_monthly_comparison_table(year, month)
-            st.dataframe(monthly_table, use_container_width=True)
+            if not monthly_table.empty:
+                st.dataframe(monthly_table, use_container_width=True)
+            
+            st.markdown("---")
+            
+            # Visitors comparison
+            st.subheader(f"{calendar.month_name[month]} Visitors Report")
+            visitors_data = self.get_admin_monthly_comparison_data(  # Fixed method name
+                "Pengunjung",
+                selected_date,
+                prev_date
+            )
+            if not visitors_data.empty:
+                st.dataframe(visitors_data, hide_index=True, use_container_width=True)
+            
+            st.markdown("---")
+            
+            # Orders comparison
+            st.subheader(f"{calendar.month_name[month]} Orders Report")
+            orders_data = self.get_admin_monthly_comparison_data(  # Fixed method name
+                "Pesanan",
+                selected_date,
+                prev_date
+            )
+            if not orders_data.empty:
+                st.dataframe(orders_data, hide_index=True, use_container_width=True)
+            
+            st.markdown("---")
+            
+            # Sales comparison
+            st.subheader(f"{calendar.month_name[month]} Sales Report")
+            sales_data = self.get_admin_monthly_comparison_data(  # Fixed method name
+                "Penjualan",
+                selected_date,
+                prev_date
+            )
+            if not sales_data.empty:
+                st.dataframe(sales_data, hide_index=True, use_container_width=True)
             
             # Generate PDF button
-            if st.button("Generate PDF Report"):
-                pdf = self.generate_monthly_pdf(
-                    monthly_data,
-                    monthly_table,
-                    fig,
-                    year,
-                    month
-                )
-                st.download_button(
-                    "Download PDF",
-                    data=pdf,
-                    file_name=f"monthly_report_{year}_{month:02d}.pdf",
-                    mime="application/pdf"
-                )
+            #st.markdown("---")
+            #if st.button("Generate PDF Report"):
+            #    pdf = self.generate_monthly_pdf(
+            #        monthly_data=monthly_data,
+            #        monthly_table=monthly_table,
+            #        visitors_data=visitors_data if 'visitors_data' in locals() else None,
+            #        orders_data=orders_data if 'orders_data' in locals() else None,
+            #       sales_data=sales_data if 'sales_data' in locals() else None,
+            #        fig=fig,
+            #        year=year,
+            #        month=month
+            #    )
+            #    st.download_button(
+            #        "Download PDF",
+            #      file_name=f"monthly_report_{year}_{month:02d}.pdf",
+            #       mime="application/pdf"
+            #    )
                 
         except Exception as e:
             st.error(f"Error generating monthly report: {str(e)}")
@@ -1127,18 +1453,65 @@ class ReportGenerator:
         fig = go.Figure()
         
         fig.add_trace(go.Bar(
-            x=monthly_data['month'].dt.strftime('%B'),
-            y=monthly_data['net_income'],
+            y=monthly_data['month'].dt.strftime('%B'),  # Changed x to y for horizontal
+            x=monthly_data['net_income'],               # Changed y to x for horizontal
             text=monthly_data['net_income'].apply(lambda x: f'Rp{x:,.0f}'),
             textposition='auto',
+            orientation='h'  # Make bars horizontal
         ))
         
         fig.update_layout(
             title="Monthly Report",
-            xaxis_title="Month",
-            yaxis_title="Net Income (Rp)",
+            yaxis_title="Month",          # Swapped axis titles
+            xaxis_title="Net Income (Rp)",
             height=500,
-            showlegend=False
+            showlegend=False,
+            yaxis={'categoryorder':'total ascending'}  # Order bars by value
+        )
+        
+        return fig
+
+    def create_current_month_chart(self, comparison_data):
+        """Create comparison bar chart for current month"""
+        # Extract current and previous month columns
+        current_month_col = comparison_data.columns[1]  # The current month column
+        prev_month_col = comparison_data.columns[2]     # The previous month column
+        
+        fig = go.Figure()
+        
+        # Add current month bars
+        fig.add_trace(go.Bar(
+            y=comparison_data['Accounts'],  # Changed to y for horizontal
+            x=comparison_data[current_month_col].apply(
+                lambda x: float(x.replace('Rp', '').replace(',', ''))
+            ),
+            name=current_month_col,
+            text=comparison_data[current_month_col],
+            textposition='auto',
+            orientation='h'  # Make bars horizontal
+        ))
+        
+        # Add previous month bars
+        fig.add_trace(go.Bar(
+            y=comparison_data['Accounts'],  # Changed to y for horizontal
+            x=comparison_data[prev_month_col].apply(
+                lambda x: float(x.replace('Rp', '').replace(',', ''))
+            ),
+            name=prev_month_col,
+            text=comparison_data[prev_month_col],
+            textposition='auto',
+            opacity=0.7,
+            orientation='h'  # Make bars horizontal
+        ))
+        
+        # Update layout
+        fig.update_layout(
+            title="Current Month vs Previous Month Comparison",
+            yaxis_title="Store Accounts",        # Swapped axis titles
+            xaxis_title="Net Income (Rp)",
+            barmode='group',
+            height=500,
+            yaxis={'categoryorder':'total ascending'}  # Order bars by value
         )
         
         return fig
@@ -1242,26 +1615,65 @@ class ReportGenerator:
             return pd.DataFrame()
     
     def save_chart_for_pdf(self, fig):
-        """Save plotly figure as bytes for PDF"""
+        """Save plotly figure as bytes for PDF with optimized settings"""
         try:
-            # Convert plot to PNG bytes directly
-            img_bytes = fig.to_image(format="png", width=700, height=400)
+            # Update chart layout for PDF
+            fig.update_layout(
+                # Make font bigger and clearer
+                font=dict(
+                    size=10,  # Adjust size: 9-11 points
+                    family="Arial"
+                ),
+                # Adjust margins
+                margin=dict(
+                    l=50,    # Adjust margins: 40-60 points
+                    r=50,    # Adjust margins: 40-60 points
+                    t=50,    # Adjust margins: 40-60 points
+                    b=50     # Adjust margins: 40-60 points
+                ),
+                # Position legend at bottom
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=-0.3,  # Adjust position: -0.2 to -0.4
+                    xanchor="center",
+                    x=0.5
+                ),
+                # Ensure white background
+                plot_bgcolor='white',
+                paper_bgcolor='white'
+            )
+            
+            # Convert plot to PNG bytes with high DPI
+            img_bytes = fig.to_image(
+                format="png",
+                width=900,     # Adjust width: 800-1000 pixels
+                height=500,    # Adjust height: 400-600 pixels
+                scale=2        # Adjust scale: 2-3 (higher means better quality)
+            )
             return BytesIO(img_bytes)
+            
         except Exception as e:
             st.error(f"Error converting chart: {str(e)}")
             return None
     
-    def generate_current_month_pdf(self, comparison_data, monthly_chart, daily_data, daily_chart, month_year):
-        """Generate PDF for current month report including today's income section"""
+    def generate_current_month_pdf(self, comparison_data, monthly_chart,
+                                 visitors_data, orders_data, sales_data,
+                                 daily_visitors, daily_orders, daily_sales,
+                                 month_year):
+        """Generate PDF for current month report including all data"""
         buffer = BytesIO()
         doc = SimpleDocTemplate(
             buffer,
             pagesize=A4,
-            rightMargin=30,
-            leftMargin=30,
+            rightMargin=20,
+            leftMargin=20,
             topMargin=30,
             bottomMargin=30
         )
+        
+        # Calculate available width
+        available_width = doc.width + doc.rightMargin + doc.leftMargin
         
         story = []
         styles = getSampleStyleSheet()
@@ -1284,75 +1696,245 @@ class ReportGenerator:
         story.append(Paragraph(f"Current Month Report - {month_year}", title_style))
         story.append(Spacer(1, 20))
         
-        # Monthly comparison section
-        story.append(Paragraph("Monthly Comparison", subtitle_style))
-        if monthly_chart:
+        # Income section
+        if monthly_chart is not None:
+            story.append(Paragraph("Monthly Income Comparison", subtitle_style))
             chart_buffer = self.save_chart_for_pdf(monthly_chart)
             if chart_buffer:
-                story.append(Image(chart_buffer, width=500, height=300))
+                story.append(Image(chart_buffer, width=available_width, height=300))
         
-        if not comparison_data.empty:
-            story.append(Spacer(1, 20))
-            monthly_table = self.create_pdf_table(comparison_data)
-            story.append(monthly_table)
+            if comparison_data is not None and not comparison_data.empty:
+                story.append(Spacer(1, 20))
+                income_table = self.create_pdf_table(comparison_data)
+                story.append(income_table)
         
         story.append(Spacer(1, 30))
         
-        # Today's income section
-        if daily_data is not None and not daily_data.empty:
-            story.append(Paragraph("Today's Income", subtitle_style))
-            if daily_chart:
-                daily_chart_buffer = self.save_chart_for_pdf(daily_chart)
-                if daily_chart_buffer:
-                    story.append(Image(daily_chart_buffer, width=500, height=300))
-            
+        # Visitors section
+        if visitors_data is not None and not visitors_data.empty:
+            story.append(Paragraph("Monthly Visitors Comparison", subtitle_style))
+            visitors_table = self.create_pdf_table(visitors_data)
+            story.append(visitors_table)
             story.append(Spacer(1, 20))
-            daily_table = self.create_pdf_table(daily_data)
-            story.append(daily_table)
+            
+            if daily_visitors is not None and not daily_visitors.empty:
+                story.append(Paragraph("Visitors Today", subtitle_style))
+                daily_visitors_table = self.create_pdf_table(daily_visitors)
+                story.append(daily_visitors_table)
+                story.append(Spacer(1, 30))
+        
+        # Orders section
+        if orders_data is not None and not orders_data.empty:
+            story.append(Paragraph("Monthly Orders Comparison", subtitle_style))
+            orders_table = self.create_pdf_table(orders_data)
+            story.append(orders_table)
+            story.append(Spacer(1, 20))
+            
+            if daily_orders is not None and not daily_orders.empty:
+                story.append(Paragraph("Orders Today", subtitle_style))
+                daily_orders_table = self.create_pdf_table(daily_orders)
+                story.append(daily_orders_table)
+                story.append(Spacer(1, 30))
+        
+        # Sales section
+        if sales_data is not None and not sales_data.empty:
+            story.append(Paragraph("Monthly Sales Comparison", subtitle_style))
+            sales_table = self.create_pdf_table(sales_data)
+            story.append(sales_table)
+            story.append(Spacer(1, 20))
+            
+            if daily_sales is not None and not daily_sales.empty:
+                story.append(Paragraph("Sales Today", subtitle_style))
+                daily_sales_table = self.create_pdf_table(daily_sales)
+                story.append(daily_sales_table)
         
         # Build PDF
         doc.build(story)
         buffer.seek(0)
         return buffer.getvalue()
 
-    def generate_monthly_pdf(self, monthly_data, monthly_table, fig, year, month):
-        """Generate PDF for monthly report"""
+    def generate_current_month_pdf(self, comparison_data, monthly_chart,
+                                 visitors_data, orders_data, sales_data,
+                                 daily_visitors, daily_orders, daily_sales,
+                                 month_year):
+        """Generate PDF for current month report including all data"""
         buffer = BytesIO()
+        
+        # Page setup with narrow margins (all measurements in points; 1 inch = 72 points)
         doc = SimpleDocTemplate(
             buffer,
-            pagesize=A4,
-            rightMargin=30,
-            leftMargin=30,
-            topMargin=30,
-            bottomMargin=30
+            pagesize=A4,  # 210mm × 297mm
+            rightMargin=36,      # 0.5 inch (36 points)  # Adjust margin: 36-72 points
+            leftMargin=36,       # 0.5 inch
+            topMargin=36,        # 0.5 inch
+            bottomMargin=36      # 0.5 inch
         )
         
-        story = []
+        # Calculate available width for content
+        available_width = doc.width + doc.rightMargin + doc.leftMargin
+        
+        # Define styles
         styles = getSampleStyleSheet()
+        
+        # Main Title (H1) Style
         title_style = ParagraphStyle(
             'CustomTitle',
             parent=styles['Heading1'],
-            fontName='Helvetica-Bold',
+            fontName='Helvetica-Bold',  # Using Helvetica as it's similar to Arial
             fontSize=16,
-            spaceAfter=30
+            spaceAfter=30,             # Adjust spacing: 20-40 points
+            spaceBefore=10,            # Adjust spacing: 5-15 points
+            leading=24,                # Line height (1.5 × fontSize)
+            alignment=0                # 0=left, 1=center, 2=right
         )
         
+        # Section Header (H2) Style
+        section_style = ParagraphStyle(
+            'SectionHeader',
+            parent=styles['Heading2'],
+            fontName='Helvetica-Bold',
+            fontSize=14,
+            spaceAfter=25,             # Adjust spacing: 15-30 points
+            spaceBefore=15,            # Adjust spacing: 10-20 points
+            leading=21,                # 1.5 × fontSize
+            alignment=0
+        )
+        
+        # Subsection Header (H3) Style
+        subsection_style = ParagraphStyle(
+            'SubsectionHeader',
+            parent=styles['Heading3'],
+            fontName='Helvetica-Bold',
+            fontSize=12,
+            spaceAfter=20,             # Adjust spacing: 10-25 points
+            spaceBefore=10,            # Adjust spacing: 5-15 points
+            leading=18,                # 1.5 × fontSize
+            alignment=0
+        )
+        
+        # Normal Text Style
+        normal_style = ParagraphStyle(
+            'CustomNormal',
+            parent=styles['Normal'],
+            fontName='Helvetica',      # Base font
+            fontSize=11,
+            leading=16.5,              # 1.5 × fontSize
+            spaceBefore=6,             # Adjust spacing: 4-8 points
+            spaceAfter=6               # Adjust spacing: 4-8 points
+        )
+        
+        # Table Styles
+        table_style = TableStyle([
+            # Table header
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 12),      # Header font size
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+            ('FONTNAME', (0, 1), (-1, -2), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -2), 10),      # Adjust size: 9-11 points
+            # Numeric column alignment
+            ('ALIGN', (1, 1), (-1, -1), 'RIGHT'),    # All number columns right-aligned
+            ('ALIGN', (0, 0), (0, -1), 'LEFT'),      # First column left-aligned
+            # Grid
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ('LINEABOVE', (0, 0), (-1, 0), 2, colors.black),
+            # Alternating row colors
+            ('ROWBACKGROUNDS', (0, 0), (-1, -1), [colors.whitesmoke, colors.white]),
+            # Total row style
+            ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, -1), (-1, -1), 10),     # Adjust size: 9-11 points
+            ('BACKGROUND', (0, -1), (-1, -1), colors.grey),
+            ('TEXTCOLOR', (0, -1), (-1, -1), colors.whitesmoke),
+            # Cell padding
+            ('TOPPADDING', (0, 0), (-1, -1), 6),     # Adjust padding: 4-8 points
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6)   # Adjust padding: 4-8 points
+        ])
+
+        # Story (content) initialization
+        story = []
+        
         # Title
-        story.append(Paragraph(f"Monthly Report - {calendar.month_name[month]} {year}", title_style))
-        story.append(Spacer(1, 20))
+        story.append(Paragraph(f"Current Month Report - {month_year}", title_style))
+        story.append(Spacer(1, 20))  # Adjust spacing: 15-25 points
         
-        # Chart
-        chart_buffer = self.save_chart_for_pdf(fig)
-        if chart_buffer:
-            story.append(Image(chart_buffer, width=500, height=300))
+        # Income section
+        if monthly_chart is not None:
+            story.append(Paragraph("Monthly Income Comparison", section_style))
+            chart_buffer = self.save_chart_for_pdf(monthly_chart)
+            if chart_buffer:
+                # Make chart full width with reasonable height
+                story.append(Image(chart_buffer, width=available_width,
+                                 height=200))  # Adjust height: 180-250 points
+            
+            if comparison_data is not None and not comparison_data.empty:
+                story.append(Spacer(1, 15))  # Adjust spacing: 10-20 points
+                story.append(Paragraph("Income Details", subsection_style))
+                income_table = Table(comparison_data.values.tolist(), 
+                                   repeatRows=1,  # Repeat header row on new pages
+                                   colWidths=[available_width/len(comparison_data.columns)]*len(comparison_data.columns))
+                income_table.setStyle(table_style)
+                story.append(income_table)
         
-        story.append(Spacer(1, 20))
+        story.append(Spacer(1, 30))  # Adjust spacing: 25-35 points
         
-        # Table
-        if not monthly_table.empty:
-            table = self.create_pdf_table(monthly_table)
-            story.append(table)
+        # Visitors section
+        if visitors_data is not None and not visitors_data.empty:
+            story.append(Paragraph("Monthly Visitors Comparison", section_style))
+            visitors_table = Table(visitors_data.values.tolist(),
+                                 repeatRows=1,
+                                 colWidths=[available_width/len(visitors_data.columns)]*len(visitors_data.columns))
+            visitors_table.setStyle(table_style)
+            story.append(visitors_table)
+            story.append(Spacer(1, 20))  # Adjust spacing: 15-25 points
+            
+            if daily_visitors is not None and not daily_visitors.empty:
+                story.append(Paragraph("Visitors Today", subsection_style))
+                daily_visitors_table = Table(daily_visitors.values.tolist(),
+                                          repeatRows=1,
+                                          colWidths=[available_width/len(daily_visitors.columns)]*len(daily_visitors.columns))
+                daily_visitors_table.setStyle(table_style)
+                story.append(daily_visitors_table)
+            story.append(Spacer(1, 30))  # Adjust spacing: 25-35 points
         
+        # Orders section
+        if orders_data is not None and not orders_data.empty:
+            story.append(Paragraph("Monthly Orders Comparison", section_style))
+            orders_table = Table(orders_data.values.tolist(),
+                               repeatRows=1,
+                               colWidths=[available_width/len(orders_data.columns)]*len(orders_data.columns))
+            orders_table.setStyle(table_style)
+            story.append(orders_table)
+            story.append(Spacer(1, 20))  # Adjust spacing: 15-25 points
+            
+            if daily_orders is not None and not daily_orders.empty:
+                story.append(Paragraph("Orders Today", subsection_style))
+                daily_orders_table = Table(daily_orders.values.tolist(),
+                                        repeatRows=1,
+                                        colWidths=[available_width/len(daily_orders.columns)]*len(daily_orders.columns))
+                daily_orders_table.setStyle(table_style)
+                story.append(daily_orders_table)
+            story.append(Spacer(1, 30))  # Adjust spacing: 25-35 points
+        
+        # Sales section
+        if sales_data is not None and not sales_data.empty:
+            story.append(Paragraph("Monthly Sales Comparison", section_style))
+            sales_table = Table(sales_data.values.tolist(),
+                              repeatRows=1,
+                              colWidths=[available_width/len(sales_data.columns)]*len(sales_data.columns))
+            sales_table.setStyle(table_style)
+            story.append(sales_table)
+            story.append(Spacer(1, 20))  # Adjust spacing: 15-25 points
+            
+            if daily_sales is not None and not daily_sales.empty:
+                story.append(Paragraph("Sales Today", subsection_style))
+                daily_sales_table = Table(daily_sales.values.tolist(),
+                                       repeatRows=1,
+                                       colWidths=[available_width/len(daily_sales.columns)]*len(daily_sales.columns))
+                daily_sales_table.setStyle(table_style)
+                story.append(daily_sales_table)
+        
+        # Build PDF
         doc.build(story)
         buffer.seek(0)
         return buffer.getvalue()
@@ -1375,21 +1957,22 @@ class ReportGenerator:
             quarterly_table = self.create_quarterly_comparison_table(year, quarter)
             st.dataframe(quarterly_table, use_container_width=True)
             
+            
             # Generate PDF button
-            if st.button("Generate PDF Report"):
-                pdf = self.generate_quarterly_pdf(
-                    quarterly_data,
-                    quarterly_table,
-                    fig,
-                    year,
-                    quarter
-                )
-                st.download_button(
-                    "Download PDF",
-                    data=pdf,
-                    file_name=f"quarterly_report_{year}_Q{quarter}.pdf",
-                    mime="application/pdf"
-                )
+            #if st.button("Generate PDF Report"):
+            #    pdf = self.generate_quarterly_pdf(
+            #        quarterly_data,
+            #        quarterly_table,
+            #       fig,
+            #        year,
+            #        quarter
+            #    )
+            #    st.download_button(
+            #        "Download PDF",
+            #        data=pdf,
+            #        file_name=f"quarterly_report_{year}_Q{quarter}.pdf",
+            #        mime="application/pdf"
+            #    )
                 
         except Exception as e:
             st.error(f"Error generating quarterly report: {str(e)}")
@@ -1605,20 +2188,20 @@ class ReportGenerator:
             st.dataframe(quarterly_table, use_container_width=True)
             
             # Generate PDF button
-            if st.button("Generate PDF Report"):
-                pdf = self.generate_quarterly_pdf(
-                    quarterly_data,
-                    quarterly_table,
-                    fig,
-                    year,
-                    quarter
-                )
-                st.download_button(
-                    "Download PDF",
-                    data=pdf,
-                    file_name=f"quarterly_report_{year}_Q{quarter}.pdf",
-                    mime="application/pdf"
-                )
+            #if st.button("Generate PDF Report"):
+            #    pdf = self.generate_quarterly_pdf(
+            #        quarterly_data,
+            #        quarterly_table,
+            #        fig,
+            #        year,
+            #        quarter
+            #    )
+            #    st.download_button(
+            #        "Download PDF",
+            #        data=pdf,
+            #        file_name=f"quarterly_report_{year}_Q{quarter}.pdf",
+            #       mime="application/pdf"
+            #   )
                 
         except Exception as e:
             st.error(f"Error generating quarterly report: {str(e)}")
