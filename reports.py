@@ -1,3 +1,4 @@
+import traceback
 import streamlit as st
 import pandas as pd
 from database import get_db_cursor
@@ -72,12 +73,12 @@ class ReportGenerator:
         """Main render method with performance optimization"""
         # Initialize session state if needed
         if 'current_tab' not in st.session_state:
-            st.session_state.current_tab = "Overview"
+            st.session_state.current_tab = "Report Overview"
         
         # Use radio buttons instead of tabs for better performance
         st.session_state.current_tab = st.sidebar.radio(
             "Select Report Section",
-            ["Report Overview", "Create Report", "Income Data"]
+            ["Report Overview", "Create Report", "Income Data", "Admin Input Data"]
         )
         
         # Render selected section
@@ -85,8 +86,10 @@ class ReportGenerator:
             self.render_overview_section()
         elif st.session_state.current_tab == "Create Report":
             self.render_create_report()
+        elif st.session_state.current_tab == "Income Data":
+            self.render_income_data_section()
         else:
-            self.render_income_data_section()  # Renamed from render_details_section
+            self.render_admin_input_section()
             
     def render_overview_section(self):
         """Render the overview section"""
@@ -257,8 +260,8 @@ class ReportGenerator:
                         FROM imp_gs_admininput
                         WHERE username = %s
                         AND type = %s
-                        AND date >= %s 
-                        AND date < (%s + INTERVAL '1 month')
+                        AND date >= DATE_TRUNC('month', CURRENT_DATE)
+                        AND date <= CURRENT_DATE
                         GROUP BY store_account_id
                     ),
                     comp_month_data AS (
@@ -268,8 +271,8 @@ class ReportGenerator:
                         FROM imp_gs_admininput
                         WHERE username = %s
                         AND type = %s
-                        AND date >= %s 
-                        AND date < (%s + INTERVAL '1 month')
+                        AND date >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+                        AND date <= (CURRENT_DATE - INTERVAL '1 month')
                         GROUP BY store_account_id
                     )
                     SELECT 
@@ -282,8 +285,7 @@ class ReportGenerator:
                     WHERE COALESCE(m.current_mo, 0) != 0 
                        OR COALESCE(c.previous_mo, 0) != 0
                     ORDER BY "Accounts"
-                """, (st.session_state.username, data_type, main_month, main_month, 
-                     st.session_state.username, data_type, comp_month, comp_month))
+                """, (st.session_state.username, data_type, st.session_state.username, data_type))
                 
                 result = cur.fetchall()
                 if not result:
@@ -413,26 +415,22 @@ class ReportGenerator:
                     WITH main_month_data AS (
                         SELECT 
                             store_account_id,
-                            store_name,
-                            account_name,
                             SUM(net_income) as current_mo
                         FROM income_data
                         WHERE username = %s
-                        AND date >= %s 
-                        AND date < (%s + INTERVAL '1 month')
-                        GROUP BY store_account_id, store_name, account_name
+                        AND date >= DATE_TRUNC('month', CURRENT_DATE)
+                        AND date <= CURRENT_DATE
+                        GROUP BY store_account_id
                     ),
                     comp_month_data AS (
                         SELECT 
                             store_account_id,
-                            store_name,
-                            account_name,
                             SUM(net_income) as previous_mo
                         FROM income_data
                         WHERE username = %s
-                        AND date >= %s 
-                        AND date < (%s + INTERVAL '1 month')
-                        GROUP BY store_account_id, store_name, account_name
+                        AND date >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+                        AND date <= (CURRENT_DATE - INTERVAL '1 month')
+                        GROUP BY store_account_id
                     )
                     SELECT 
                         COALESCE(m.store_account_id, c.store_account_id) as "Accounts",
@@ -444,8 +442,7 @@ class ReportGenerator:
                     WHERE COALESCE(m.current_mo, 0) != 0 
                        OR COALESCE(c.previous_mo, 0) != 0
                     ORDER BY "Accounts"
-                """, (st.session_state.username, main_month, main_month, 
-                     st.session_state.username, comp_month, comp_month))
+                """, (st.session_state.username, st.session_state.username))
                 
                 result = cur.fetchall()
                 if not result:
@@ -682,27 +679,105 @@ class ReportGenerator:
         except Exception as e:
             st.error(f"Error in today's income: {str(e)}")
             return pd.DataFrame()
-
-    def render_income_data_tab(self):
-        """Render Income Data tab content"""
+    
+    def get_income_today_comparison(self):
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT EXISTS (
+                        SELECT 1 FROM income_data 
+                        WHERE username = %s 
+                        AND date = CURRENT_DATE
+                    )
+                """, (st.session_state.username,))
+                
+                has_data = cur.fetchone()['exists']
+                
+                if not has_data:
+                    return None
+                    
+                cur.execute("""
+                    WITH today_data AS (
+                        SELECT 
+                            store_account_id,
+                            SUM(net_income) as current_mo
+                        FROM income_data
+                        WHERE username = %s
+                        AND date = CURRENT_DATE
+                        GROUP BY store_account_id
+                    ),
+                    lastmonth_data AS (
+                        SELECT 
+                            store_account_id,
+                            SUM(net_income) as previous_mo
+                        FROM income_data
+                        WHERE username = %s
+                        AND date = (CURRENT_DATE - INTERVAL '1 month')
+                        GROUP BY store_account_id
+                    )
+                    SELECT 
+                        t.store_account_id as "Accounts",
+                        t.current_mo,
+                        COALESCE(l.previous_mo, 0) as previous_mo
+                    FROM today_data t
+                    LEFT JOIN lastmonth_data l USING (store_account_id)
+                """, (st.session_state.username, st.session_state.username))
+                
+                df = pd.DataFrame(cur.fetchall())
+                df['Diff_num'] = df['current_mo'] - df['previous_mo'] 
+                df['Difference_%'] = (df['Diff_num'] / df['previous_mo'] * 100).fillna(0)
+                
+                for col in ['current_mo', 'previous_mo', 'Diff_num']:
+                    df[col] = df[col].apply(lambda x: f"Rp{x:,.0f}")
+                df['Difference_%'] = df['Difference_%'].apply(lambda x: f"{x:.2f}%")
+                
+                return df
+                    
+        except Exception as e:
+            st.error(f"Error getting income today comparison: {str(e)}")
+            return None
+        
+    def render_admin_input_section(self):
+        """Render Admin Input Data tab content"""
+        st.header("Admin Input Data")
+        
+        # Date range filter
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input(
+                "Start Date",
+                value=None,
+                key="admin_start_date"
+            )
+        with col2:
+            end_date = st.date_input(
+                "End Date",
+                value=None,
+                key="admin_end_date"
+            )
+        
         # Store filter
         stores = self.get_unique_stores()
         selected_store = st.selectbox(
             "Filter by Store Account", 
-            ["All"] + stores
+            ["All"] + stores,
+            key="admin_store_filter"
         )
         
-        # Sort direction
-        sort_direction = st.radio(
-            "Sort by date", 
-            ["Ascending", "Descending"],
-            horizontal=True
+        # Type filter
+        types = self.get_unique_types()
+        selected_type = st.selectbox(
+            "Filter by Type",
+            ["All"] + types,
+            key="admin_type_filter"
         )
         
         # Get and display filtered data
-        filtered_data = self.get_filtered_income_data(
+        filtered_data = self.get_filtered_admin_data(
             selected_store,
-            sort_direction.lower()
+            selected_type,
+            start_date,
+            end_date
         )
         
         if not filtered_data.empty:
@@ -714,42 +789,166 @@ class ReportGenerator:
         else:
             st.info("No data available")
 
-    def get_filtered_income_data(self, store_account_id_filter, sort_direction):
+    def get_unique_types(self):
+        """Get unique types from admin input data"""
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT DISTINCT type 
+                    FROM imp_gs_admininput 
+                    WHERE username = %s
+                    ORDER BY type
+                """, (st.session_state.username,))
+                return [row['type'] for row in cur.fetchall()]
+        except Exception as e:
+            st.error(f"Error getting types: {str(e)}")
+            return []
+
+    def get_filtered_admin_data(self, store_account_id_filter, type_filter, start_date, end_date):
+        """Get filtered admin input data"""
+        try:
+            with get_db_cursor() as cur:
+                # Build base query
+                query = """
+                    SELECT 
+                        date::date as "Date",
+                        store_account_id as "Store Account ID",
+                        type as "Type",
+                        value as "Value"
+                    FROM imp_gs_admininput
+                    WHERE username = %s
+                """
+                params = [st.session_state.username]
+                
+                # Add filters
+                if store_account_id_filter != "All":
+                    query += " AND store_account_id = %s"
+                    params.append(store_account_id_filter)
+                
+                if type_filter != "All":
+                    query += " AND type = %s"
+                    params.append(type_filter)
+                
+                if start_date and end_date:
+                    query += " AND date BETWEEN %s AND %s"
+                    params.extend([start_date, end_date])
+                
+                query += " ORDER BY date DESC"
+
+                cur.execute(query, tuple(params))
+                result = cur.fetchall()
+                
+                if result:
+                    df = pd.DataFrame(result)
+                    # Format value based on type
+                    df["Value"] = df.apply(
+                        lambda row: f"Rp{int(row['Value']):,}" if row["Type"] == "Penjualan" 
+                        else f"{int(row['Value']):,}", 
+                        axis=1
+                    )
+                    return df
+                return pd.DataFrame()
+                
+        except Exception as e:
+            st.error(f"Error in filtered data: {str(e)}")
+            return pd.DataFrame() 
+
+    def render_income_data_section(self):
+        """Render Income Data tab content"""
+        st.header("Income Data")
+        
+        # Date range filter
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input(
+                "Start Date",
+                value=None,
+                key="income_start_date"
+            )
+        with col2:
+            end_date = st.date_input(
+                "End Date",
+                value=None,
+                key="income_end_date"
+            )
+        
+        # Store filter
+        stores = self.get_unique_stores()
+        selected_store = st.selectbox(
+            "Filter by Store Account", 
+            ["All"] + stores
+        )
+        
+        # Get and display filtered data
+        filtered_data = self.get_filtered_income_data(
+            selected_store,
+            start_date,
+            end_date
+        )
+        
+        if not filtered_data.empty:
+            st.dataframe(
+                filtered_data,
+                hide_index=True,
+                use_container_width=True
+            )
+        else:
+            st.info("No data available")
+
+    def get_filtered_income_data(self, store_account_id_filter, start_date, end_date):
         """Get filtered income data"""
         try:
             with get_db_cursor() as cur:
                 if store_account_id_filter == "All":
-                    cur.execute("""
-                        SELECT 
-                            date::date as "Date",
-                            store_account_id as "Store Account ID",
-                            store_name as "Store",
-                            account_name as "Account",
-                            net_income as "Net Income"
-                        FROM income_data
-                        WHERE username = %s
-                        ORDER BY date {}
-                    """.format('ASC' if sort_direction == 'ascending' else 'DESC'),
-                        (st.session_state.username,))
+                    if start_date and end_date:
+                        cur.execute("""
+                            SELECT 
+                                date::date as "Date",
+                                store_account_id as "Store Account ID",
+                                net_income as "Net Income"
+                            FROM income_data
+                            WHERE username = %s
+                            AND date BETWEEN %s AND %s
+                            ORDER BY date DESC
+                        """, (st.session_state.username, start_date, end_date))
+                    else:
+                        cur.execute("""
+                            SELECT 
+                                date::date as "Date",
+                                store_account_id as "Store Account ID",
+                                net_income as "Net Income"
+                            FROM income_data
+                            WHERE username = %s
+                            ORDER BY date DESC
+                        """, (st.session_state.username,))
                 else:
-                    cur.execute("""
-                        SELECT 
-                            date::date as "Date",
-                            store_account_id as "Store Account ID",
-                            store_name as "Store",
-                            account_name as "Account",
-                            net_income as "Net Income"
-                        FROM income_data
-                        WHERE username = %s
-                        AND store_account_id = %s
-                        ORDER BY date {}
-                    """.format('ASC' if sort_direction == 'ascending' else 'DESC'),
-                        (st.session_state.username, store_account_id_filter))
+                    if start_date and end_date:
+                        cur.execute("""
+                            SELECT 
+                                date::date as "Date",
+                                store_account_id as "Store Account ID",
+                                net_income as "Net Income"
+                            FROM income_data
+                            WHERE username = %s
+                            AND store_account_id = %s
+                            AND date BETWEEN %s AND %s
+                            ORDER BY date DESC
+                        """, (st.session_state.username, store_account_id_filter, start_date, end_date))
+                    else:
+                        cur.execute("""
+                            SELECT 
+                                date::date as "Date",
+                                store_account_id as "Store Account ID",
+                                net_income as "Net Income"
+                            FROM income_data
+                            WHERE username = %s
+                            AND store_account_id = %s
+                            ORDER BY date DESC
+                        """, (st.session_state.username, store_account_id_filter))
                 
                 result = cur.fetchall()
                 if result:
                     df = pd.DataFrame(result)
-                    # Format currency columns
                     df["Net Income"] = df["Net Income"].apply(lambda x: f"Rp{x:,.0f}")
                     return df
                 return pd.DataFrame()
@@ -919,6 +1118,78 @@ class ReportGenerator:
         current_date = datetime.now()
         return year < current_date.year
     
+    def add_total_row(df):
+        """Add total row to any dataframe with proper formatting"""
+        if df is None or df.empty:
+            return df
+       
+        try:
+        #  Create total row
+            total = pd.DataFrame([{
+            'Accounts': 'Total',
+            'current_mo': df['current_mo'].str.replace('Rp', '').str.replace(',', '').astype(float).sum(),
+            'previous_mo': df['previous_mo'].str.replace('Rp', '').str.replace(',', '').astype(float).sum()
+            }])
+        
+        # Calculate differences for total row
+            total['Diff_num'] = total['current_mo'] - total['previous_mo']
+            total['Difference %'] = (total['Diff_num'] / total['previous_mo'] * 100).fillna(0)
+        
+        # Format total row same as other rows
+            for col in ['current_mo', 'previous_mo', 'Diff_num']:
+                total[col] = total[col].apply(lambda x: f"Rp{x:,.0f}")
+            total['Difference %'] = total['Difference_%'].apply(lambda x: f"{x:.2f}%")
+        
+        # Combine with original dataframe
+            return pd.concat([df, total], ignore_index=True)
+        
+        except Exception as e:
+            st.error(f"Error adding total row: {str(e)}")
+            return df
+        
+    def format_with_total(self, df, from_func_name):
+        """
+        Add total row to dataframes from any get_X_comparison function
+        from_func_name: monthly, income_today, admin_monthly, daily_admin
+        """
+        if df is None or df.empty:
+            return df
+       
+        try:
+            # Set columns based on function source
+            cols = {
+                'monthly': ['current_mo', 'previous_mo', 'Difference Rp'],
+                'income_today': ['current_mo', 'previous_mo', 'Diff_num'],
+                'admin_monthly': ['current_mo', 'previous_mo', 'Diff_num'],
+                'daily_admin': ['today', 'yesterday', 'Diff_num']
+            }
+            
+            numeric_cols = cols[from_func_name]
+            pct_col = 'Difference %' if from_func_name != 'daily_admin' else 'Diff %'
+            
+            # Create total row
+            sums = {col: df[col].str.replace('Rp', '').str.replace(',', '').astype(float).sum() 
+                    for col in numeric_cols}
+            total = pd.DataFrame([{
+                'Accounts': 'Total',
+                **sums
+            }])
+            
+            # Add percentage
+            total[pct_col] = ((total[numeric_cols[0]] - total[numeric_cols[1]]) / 
+                                total[numeric_cols[1]] * 100).fillna(0)
+            
+            # Format columns
+            for col in numeric_cols:
+                total[col] = total[col].apply(lambda x: f"Rp{x:,.0f}")
+            total[pct_col] = total[pct_col].apply(lambda x: f"{x:.2f}%")
+            
+            return pd.concat([df, total], ignore_index=True)
+            
+        except Exception as e:
+            st.error(f"Error adding total row: {str(e)}")
+            return df
+    
     def generate_current_month_pdf(self, comparison_data, monthly_chart,
                                  visitors_data, orders_data, sales_data,
                                  daily_visitors, daily_orders, daily_sales,
@@ -971,6 +1242,24 @@ class ReportGenerator:
             story.append(income_table)
         
         story.append(Spacer(1, 30))
+        
+        # Income Today section
+        st.subheader("Income Today") 
+        income_today = self.get_income_today_comparison()
+        st.write("Debug - DataFrame:", income_today)
+        if not income_today.empty:
+            st.dataframe(income_today, hide_index=True, use_container_width=True)
+        else:
+            st.info("No income data for today")
+
+        # Modify the PDF section to include Income Today
+        if comparison_data.empty:
+            story.append(Spacer(1, 30))
+
+        story.append(Paragraph("Income Today", subtitle_style))
+        if not income_today.empty:
+            income_today_table = self.create_pdf_table(income_today)
+            story.append(income_today_table)
         
         # Visitors section
         if not visitors_data.empty:
@@ -1190,9 +1479,15 @@ class ReportGenerator:
         """Generate current month report"""
         try:
             current_date = datetime.now()
-            current_month = current_date.month
-            
-            # Income comparison section
+       
+            def display_comparison_table(df, from_func_name, info_message="No data available"):
+                if df is not None and not df.empty:
+                    df = self.format_with_total(df, from_func_name)
+                    st.dataframe(df, hide_index=True, use_container_width=True)
+                else:
+                    st.info(info_message)
+
+            # Monthly Income section 
             comparison_data = self.get_monthly_comparison_data(
                 current_date.replace(day=1),
                 (current_date.replace(day=1) - timedelta(days=1)).replace(day=1)
@@ -1202,93 +1497,62 @@ class ReportGenerator:
                 st.subheader("Monthly Income Comparison")
                 monthly_chart = self.create_current_month_chart(comparison_data)
                 st.plotly_chart(monthly_chart, use_container_width=True)
-                st.dataframe(comparison_data, hide_index=True, use_container_width=True)
+                display_comparison_table(comparison_data, 'monthly', "No monthly data available")
 
-            # Admin input data section
+            # Income Today section
+            st.markdown("---")
+            st.subheader("Income Today")
+            income_today = self.get_income_today_comparison()
+            display_comparison_table(income_today, 'income_today', "No data for today")
+            
+            # Admin data sections
             st.markdown("---")
             
             # Visitors section
             st.subheader("Monthly Visitors Comparison")
-            visitors_data = self.get_admin_monthly_comparison_data(  # Fixed method name
-                "Pengunjung",
+            visitors_data = self.get_admin_monthly_comparison_data(
+                "Pengunjung", 
                 current_date.replace(day=1),
                 (current_date.replace(day=1) - timedelta(days=1)).replace(day=1)
             )
-            if not visitors_data.empty:
-                st.dataframe(visitors_data, hide_index=True, use_container_width=True)
-                
-            # Today's visitors
+            display_comparison_table(visitors_data, 'admin_monthly', "No visitors data available")
+            
             st.subheader("Visitors Today")
             daily_visitors = self.get_daily_admin_comparison_data("Pengunjung")
-            if not daily_visitors.empty:
-                st.dataframe(daily_visitors, hide_index=True, use_container_width=True)
-            else:
-                st.info("No visitors data for today")
+            display_comparison_table(daily_visitors, 'daily_admin', "No visitors data for today")
             
             st.markdown("---")
             
             # Orders section
             st.subheader("Monthly Orders Comparison")
-            orders_data = self.get_admin_monthly_comparison_data(  # Fixed method name
+            orders_data = self.get_admin_monthly_comparison_data(
                 "Pesanan",
                 current_date.replace(day=1),
                 (current_date.replace(day=1) - timedelta(days=1)).replace(day=1)
             )
-            if not orders_data.empty:
-                st.dataframe(orders_data, hide_index=True, use_container_width=True)
-                
-            # Today's orders
+            display_comparison_table(orders_data, 'admin_monthly', "No orders data available")
+            
             st.subheader("Orders Today")
             daily_orders = self.get_daily_admin_comparison_data("Pesanan")
-            if not daily_orders.empty:
-                st.dataframe(daily_orders, hide_index=True, use_container_width=True)
-            else:
-                st.info("No orders data for today")
+            display_comparison_table(daily_orders, 'daily_admin', "No orders data for today")
             
             st.markdown("---")
             
             # Sales section
             st.subheader("Monthly Sales Comparison")
-            sales_data = self.get_admin_monthly_comparison_data(  # Fixed method name
+            sales_data = self.get_admin_monthly_comparison_data(
                 "Penjualan",
                 current_date.replace(day=1),
                 (current_date.replace(day=1) - timedelta(days=1)).replace(day=1)
             )
-            if not sales_data.empty:
-                st.dataframe(sales_data, hide_index=True, use_container_width=True)
-                
-            # Today's sales
+            display_comparison_table(sales_data, 'admin_monthly', "No sales data available")
+            
             st.subheader("Sales Today")
             daily_sales = self.get_daily_admin_comparison_data("Penjualan")
-            if not daily_sales.empty:
-                st.dataframe(daily_sales, hide_index=True, use_container_width=True)
-            else:
-                st.info("No sales data for today")
-            
-            # Generate PDF button
-            #st.markdown("---")
-            #if st.button("Generate PDF Report"):
-            #    pdf = self.generate_current_month_pdf(
-            #        comparison_data=comparison_data,
-            #        monthly_chart=monthly_chart,
-            #        visitors_data=visitors_data if 'visitors_data' in locals() else None,
-            #        orders_data=orders_data if 'orders_data' in locals() else None,
-            #        sales_data=sales_data if 'sales_data' in locals() else None,
-            #        daily_visitors=daily_visitors if 'daily_visitors' in locals() else None,
-            #       daily_orders=daily_orders if 'daily_orders' in locals() else None,
-            #        daily_sales=daily_sales if 'daily_sales' in locals() else None,
-            #        month_year=current_date.strftime('%B %Y')
-            #   )
-            #    st.download_button(
-            #        "Download PDF",
-            #        data=pdf,
-            #        file_name=f"current_month_report_{current_date.strftime('%Y_%m')}.pdf",
-            #        mime="application/pdf"
-            #    )
+            display_comparison_table(daily_sales, 'daily_admin', "No sales data for today")
                 
         except Exception as e:
             st.error(f"Error generating current month report: {str(e)}")
-            import traceback
             st.error(traceback.format_exc())
 
     def create_pdf_table(self, df):
